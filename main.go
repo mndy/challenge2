@@ -3,20 +3,68 @@ package challenge2
 import (
 	"flag"
 	"fmt"
+	"golang.org/x/crypto/nacl/box"
+	"golang.org/x/crypto/nacl/secretbox"
 	"io"
 	"log"
 	"net"
 	"os"
 )
 
+var readNonce [24]byte
+var writeNonce [24]byte
+
+type secureReader struct {
+	src io.Reader
+	key *[32]byte
+}
+
+type secureWriter struct {
+	dst io.Writer
+	key *[32]byte
+}
+
+func increment(nonce *[24]byte) {
+	for i := range nonce {
+		nonce[i] += 1
+		if nonce[i] != 0 {
+			break
+		}
+	}
+}
+
+func (p secureReader) Read(b []byte) (int, error) {
+	increment(&readNonce)
+	tmp := make([]byte, len(b)+secretbox.Overhead)
+	n, err := p.src.Read(tmp)
+	secretbox.Open(b[:0], tmp[:n], &readNonce, p.key) // Deal with error!
+	return n - box.Overhead, err
+}
+
+func (p secureWriter) Write(b []byte) (int, error) {
+	increment(&writeNonce)
+	tmp := make([]byte, len(b)+secretbox.Overhead)
+	tmp = secretbox.Seal(tmp[:0], b, &writeNonce, p.key)
+	sent := 0
+	for sent < len(tmp) {
+		n, _ := p.dst.Write(tmp[sent:]) // Deal with error!
+		sent += n
+	}
+	return sent, nil
+}
+
 // NewSecureReader instantiates a new SecureReader
 func NewSecureReader(r io.Reader, priv, pub *[32]byte) io.Reader {
-	return nil
+	sr := secureReader{src: r, key: new([32]byte)}
+	box.Precompute(sr.key, pub, priv)
+	return sr
 }
 
 // NewSecureWriter instantiates a new SecureWriter
 func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
-	return nil
+	sw := secureWriter{dst: w, key: new([32]byte)}
+	box.Precompute(sw.key, pub, priv)
+	return sw
 }
 
 // Dial generates a private/public key pair,
