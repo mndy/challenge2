@@ -1,4 +1,4 @@
-package challenge2
+package main
 
 import (
 	"fmt"

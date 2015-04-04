@@ -1,6 +1,9 @@
-package challenge2
+package main
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"golang.org/x/crypto/nacl/box"
@@ -11,12 +14,15 @@ import (
 	"os"
 )
 
-var readNonce [24]byte
-var writeNonce [24]byte
+type header struct {
+	Length uint64
+	Nonce  [24]byte
+}
 
 type secureReader struct {
 	src io.Reader
 	key *[32]byte
+	buf []byte
 }
 
 type secureWriter struct {
@@ -24,38 +30,76 @@ type secureWriter struct {
 	key *[32]byte
 }
 
-func increment(nonce *[24]byte) {
-	for i := range nonce {
-		nonce[i] += 1
-		if nonce[i] != 0 {
-			break
-		}
-	}
+type secureConn struct {
+	io.Reader
+	io.Writer
+	io.Closer
+}
+
+func generateNonce(nonce *[24]byte) error {
+	_, err := io.ReadFull(rand.Reader, nonce[:])
+	return err
 }
 
 func (p secureReader) Read(b []byte) (int, error) {
-	increment(&readNonce)
-	tmp := make([]byte, len(b)+secretbox.Overhead)
-	n, err := p.src.Read(tmp)
-	secretbox.Open(b[:0], tmp[:n], &readNonce, p.key) // Deal with error!
-	return n - box.Overhead, err
+	if p.buf == nil {
+		var h header
+		if err := binary.Read(p.src, binary.LittleEndian, &h); err != nil {
+			return 0, err
+		}
+
+		p.buf = make([]byte, h.Length-secretbox.Overhead)
+		tmp := make([]byte, h.Length)
+
+		if _, err := io.ReadFull(p.src, tmp); err != nil {
+			return 0, err
+		}
+
+		_, auth := secretbox.Open(p.buf[:0], tmp[:], &h.Nonce, p.key)
+		if !auth {
+			return 0, fmt.Errorf("Message failed authentication")
+		}
+	}
+	var size int
+	if len(b) >= len(p.buf) {
+		size = len(p.buf)
+	} else {
+		size = len(b)
+	}
+
+	for i := 0; i < size; i++ {
+		b[i] = p.buf[i]
+	}
+
+	if size == len(p.buf) {
+		p.buf = nil
+	} else {
+		p.buf = p.buf[size:]
+	}
+	return size, nil
 }
 
 func (p secureWriter) Write(b []byte) (int, error) {
-	increment(&writeNonce)
-	tmp := make([]byte, len(b)+secretbox.Overhead)
-	tmp = secretbox.Seal(tmp[:0], b, &writeNonce, p.key)
-	sent := 0
-	for sent < len(tmp) {
-		n, _ := p.dst.Write(tmp[sent:]) // Deal with error!
-		sent += n
+	var h header
+	h.Length = uint64(len(b) + secretbox.Overhead)
+	if err := generateNonce(&h.Nonce); err != nil {
+		return 0, err
 	}
-	return sent, nil
+
+	hbuf := new(bytes.Buffer)
+	binary.Write(hbuf, binary.LittleEndian, &h)
+	if _, err := p.dst.Write(hbuf.Bytes()); err != nil {
+		return 0, err
+	}
+
+	tmp := make([]byte, h.Length)
+	secretbox.Seal(tmp[:0], b, &h.Nonce, p.key)
+	return p.dst.Write(tmp)
 }
 
 // NewSecureReader instantiates a new SecureReader
 func NewSecureReader(r io.Reader, priv, pub *[32]byte) io.Reader {
-	sr := secureReader{src: r, key: new([32]byte)}
+	sr := secureReader{src: r, key: new([32]byte), buf: nil}
 	box.Precompute(sr.key, pub, priv)
 	return sr
 }
@@ -67,16 +111,95 @@ func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
 	return sw
 }
 
+func generateKeys() (priv, pub *[32]byte, err error) {
+	pub, priv, err = box.GenerateKey(rand.Reader)
+	return
+}
+
 // Dial generates a private/public key pair,
 // connects to the server, perform the handshake
 // and return a reader/writer.
 func Dial(addr string) (io.ReadWriteCloser, error) {
-	return nil, nil
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	priv, pub, err := generateKeys()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	if _, err := conn.Write(pub[:]); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	servpub := new([32]byte)
+	if _, err := io.ReadFull(conn, servpub[:]); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	secconn := secureConn{
+		NewSecureReader(conn, priv, servpub),
+		NewSecureWriter(conn, priv, servpub),
+		conn}
+
+	return secconn, nil
+}
+
+func connect(c net.Conn) {
+	defer c.Close()
+
+	clientpub := new([32]byte)
+	_, err := io.ReadFull(c, clientpub[:])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	priv, pub, err := generateKeys()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, err := c.Write(pub[:]); err != nil {
+		log.Fatal(err)
+	}
+
+	r := NewSecureReader(c, priv, clientpub)
+	w := NewSecureWriter(c, priv, clientpub)
+
+	buf := make([]byte, 2048)
+	for {
+		n, err := r.Read(buf)
+		if err != nil && err != io.EOF {
+			log.Fatal(err)
+		}
+		if n > 0 {
+			if _, err := w.Write(buf[:n]); err != nil {
+				log.Fatal(err)
+			}
+		}
+		if err == io.EOF {
+			return
+		}
+	}
 }
 
 // Serve starts a secure echo server on the given listener.
 func Serve(l net.Listener) error {
-	return nil
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return err
+		}
+		go connect(conn)
+	}
+}
+
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
 func main() {
