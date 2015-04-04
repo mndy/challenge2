@@ -30,12 +30,6 @@ type secureWriter struct {
 	key *[32]byte
 }
 
-type secureConn struct {
-	io.Reader
-	io.Writer
-	io.Closer
-}
-
 func generateNonce(nonce *[24]byte) error {
 	_, err := io.ReadFull(rand.Reader, nonce[:])
 	return err
@@ -152,10 +146,15 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 
-	secconn := secureConn{
+	secconn := struct {
+		io.Reader
+		io.Writer
+		io.Closer
+	}{
 		NewSecureReader(conn, priv, servpub),
 		NewSecureWriter(conn, priv, servpub),
-		conn}
+		conn,
+	}
 
 	return secconn, nil
 }
