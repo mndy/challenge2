@@ -111,8 +111,30 @@ func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
 	return sw
 }
 
-func generateKeys() (priv, pub *[32]byte, err error) {
+func swapKeys(r io.Reader, w io.Writer) (priv, pub, peer *[32]byte, err error) {
 	pub, priv, err = box.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	sent := make(chan error)
+	defer close(sent)
+
+	go func() {
+		_, err := w.Write(pub[:])
+		sent <- err
+	}()
+
+	peer = new([32]byte)
+	_, err = io.ReadFull(r, peer[:])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	if err = <-sent; err != nil {
+		return nil, nil, nil, err
+	}
+
 	return
 }
 
@@ -125,20 +147,8 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 
-	priv, pub, err := generateKeys()
+	priv, _, servpub, err := swapKeys(conn, conn)
 	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	if _, err := conn.Write(pub[:]); err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	servpub := new([32]byte)
-	if _, err := io.ReadFull(conn, servpub[:]); err != nil {
-		conn.Close()
 		return nil, err
 	}
 
@@ -153,17 +163,8 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 func connect(c net.Conn) {
 	defer c.Close()
 
-	clientpub := new([32]byte)
-	_, err := io.ReadFull(c, clientpub[:])
+	priv, _, clientpub, err := swapKeys(c, c)
 	if err != nil {
-		log.Fatal(err)
-	}
-
-	priv, pub, err := generateKeys()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if _, err := c.Write(pub[:]); err != nil {
 		log.Fatal(err)
 	}
 
