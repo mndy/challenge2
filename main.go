@@ -110,7 +110,7 @@ func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
 // Swap public keys over ReadWriter.
 func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
 	// Generate our public/private key pair
-	pub, priv, err = box.GenerateKey(rand.Reader)
+	pub, priv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -146,7 +146,7 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 
-	priv, _, pub, err := swapKeys(conn)
+	priv, pub, err := swapKeys(conn)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 func connect(conn net.Conn) {
 	defer conn.Close()
 
-	priv, _, pub, err := swapKeys(conn)
+	priv, pub, err := swapKeys(conn)
 	if err != nil {
 		log.Fatal(err)
 	}
