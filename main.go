@@ -89,7 +89,10 @@ func (p secureWriter) Write(b []byte) (int, error) {
 	// Encrypt and send the message
 	tmp := make([]byte, h.Length)
 	secretbox.Seal(tmp[:0], b, &h.Nonce, p.key)
-	return p.dst.Write(tmp)
+	if _, err := p.dst.Write(tmp); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 // NewSecureReader instantiates a new SecureReader
@@ -173,20 +176,8 @@ func connect(conn net.Conn) {
 	r := NewSecureReader(conn, priv, pub)
 	w := NewSecureWriter(conn, priv, pub)
 
-	buf := make([]byte, 2048)
-	for {
-		n, err := r.Read(buf)
-		if err != nil && err != io.EOF {
-			log.Fatal(err)
-		}
-		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
-				log.Fatal(err)
-			}
-		}
-		if err == io.EOF {
-			return
-		}
+	if _, err := io.Copy(w, r); err != nil {
+		log.Fatal(err)
 	}
 }
 
