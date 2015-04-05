@@ -12,12 +12,14 @@ func TestReadWriterPing(t *testing.T) {
 	priv, pub := &[32]byte{'p', 'r', 'i', 'v'}, &[32]byte{'p', 'u', 'b'}
 
 	r, w := io.Pipe()
-	defer w.Close()
 	secureR := NewSecureReader(r, priv, pub)
 	secureW := NewSecureWriter(w, priv, pub)
 
 	// Encrypt hello world
-	go fmt.Fprintf(secureW, "hello world\n")
+	go func() {
+		fmt.Fprintf(secureW, "hello world\n")
+		w.Close()
+	}()
 
 	// Decrypt message
 	buf := make([]byte, 1024)
@@ -80,7 +82,7 @@ func TestSecureWriter(t *testing.T) {
 
 func TestSecureEchoServer(t *testing.T) {
 	// Create a random listener
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +115,7 @@ func TestSecureEchoServer(t *testing.T) {
 
 func TestSecureServe(t *testing.T) {
 	// Create a random listener
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +144,7 @@ func TestSecureServe(t *testing.T) {
 
 func TestSecureDial(t *testing.T) {
 	// Create a random listener
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
