@@ -14,6 +14,10 @@ import (
 	"os"
 )
 
+// header encodes encrypted message length and nonce information.
+// It is sent unencrypted at the start of the message.
+// The length is used to ensure we read enough data to decrypt the
+// fix length message.
 type header struct {
 	Length uint64
 	Nonce  [24]byte
@@ -30,41 +34,35 @@ type secureWriter struct {
 	key *[32]byte
 }
 
-func generateNonce(nonce *[24]byte) error {
-	_, err := io.ReadFull(rand.Reader, nonce[:])
-	return err
-}
-
 func (p secureReader) Read(b []byte) (int, error) {
+	// Check to see if there are still remnants of the last message to
+	// read
 	if p.buf == nil {
+		// Read header from stream
 		var h header
 		if err := binary.Read(p.src, binary.LittleEndian, &h); err != nil {
 			return 0, err
 		}
 
+		// Allocate a buffer to contain the encrypted and decrypted message
 		p.buf = make([]byte, h.Length-secretbox.Overhead)
 		tmp := make([]byte, h.Length)
 
+		// Read the encrypted message
 		if _, err := io.ReadFull(p.src, tmp); err != nil {
 			return 0, err
 		}
 
+		// Decrypt message and check it is authentic
 		_, auth := secretbox.Open(p.buf[:0], tmp[:], &h.Nonce, p.key)
 		if !auth {
 			return 0, fmt.Errorf("Message failed authentication")
 		}
 	}
-	var size int
-	if len(b) >= len(p.buf) {
-		size = len(p.buf)
-	} else {
-		size = len(b)
-	}
 
-	for i := 0; i < size; i++ {
-		b[i] = p.buf[i]
-	}
-
+	// Copy the result into the output buffer, leaving a partial result
+	// in the buffer if needed
+	size := copy(b, p.buf)
 	if size == len(p.buf) {
 		p.buf = nil
 	} else {
@@ -74,18 +72,21 @@ func (p secureReader) Read(b []byte) (int, error) {
 }
 
 func (p secureWriter) Write(b []byte) (int, error) {
+	// Encode header containing length and randomly generated nonce
 	var h header
 	h.Length = uint64(len(b) + secretbox.Overhead)
-	if err := generateNonce(&h.Nonce); err != nil {
+	if _, err := io.ReadFull(rand.Reader, h.Nonce[:]); err != nil {
 		return 0, err
 	}
 
+	// Write header out
 	hbuf := new(bytes.Buffer)
 	binary.Write(hbuf, binary.LittleEndian, &h)
 	if _, err := p.dst.Write(hbuf.Bytes()); err != nil {
 		return 0, err
 	}
 
+	// Encrypt and send the message
 	tmp := make([]byte, h.Length)
 	secretbox.Seal(tmp[:0], b, &h.Nonce, p.key)
 	return p.dst.Write(tmp)
@@ -105,28 +106,32 @@ func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
 	return sw
 }
 
-func swapKeys(r io.Reader, w io.Writer) (priv, pub, peer *[32]byte, err error) {
+// Generate a public/private key pair.
+// Swap public keys over ReadWriter.
+func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
+	// Generate our public/private key pair
 	pub, priv, err = box.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	sent := make(chan error)
-	defer close(sent)
-
+	// Send our public key
+	senderr := make(chan error)
 	go func() {
-		_, err := w.Write(pub[:])
-		sent <- err
+		_, err := rw.Write(pub[:])
+		senderr <- err
 	}()
 
+	// Receive their public key
 	peer = new([32]byte)
-	_, err = io.ReadFull(r, peer[:])
+	_, err = io.ReadFull(rw, peer[:])
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	if err = <-sent; err != nil {
-		return nil, nil, nil, err
+	// Wait for our send to complete
+	if err = <-senderr; err != nil {
+		return nil, nil, err
 	}
 
 	return
@@ -141,34 +146,32 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 
-	priv, _, servpub, err := swapKeys(conn, conn)
+	priv, _, pub, err := swapKeys(conn)
 	if err != nil {
 		return nil, err
 	}
 
-	secconn := struct {
+	return struct {
 		io.Reader
 		io.Writer
 		io.Closer
 	}{
-		NewSecureReader(conn, priv, servpub),
-		NewSecureWriter(conn, priv, servpub),
+		NewSecureReader(conn, priv, pub),
+		NewSecureWriter(conn, priv, pub),
 		conn,
-	}
-
-	return secconn, nil
+	}, nil
 }
 
-func connect(c net.Conn) {
-	defer c.Close()
+func connect(conn net.Conn) {
+	defer conn.Close()
 
-	priv, _, clientpub, err := swapKeys(c, c)
+	priv, _, pub, err := swapKeys(conn)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	r := NewSecureReader(c, priv, clientpub)
-	w := NewSecureWriter(c, priv, clientpub)
+	r := NewSecureReader(conn, priv, pub)
+	w := NewSecureWriter(conn, priv, pub)
 
 	buf := make([]byte, 2048)
 	for {
