@@ -192,10 +192,6 @@ func Serve(l net.Listener) error {
 	}
 }
 
-func init() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-}
-
 func main() {
 	port := flag.Int("l", 0, "Listen mode. Specify port")
 	flag.Parse()
