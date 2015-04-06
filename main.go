@@ -74,16 +74,6 @@ func (h *header) WriteTo(w io.Writer) (n int64, err error) {
 	return
 }
 
-// The encrypted length of the message
-func (h *header) EncryptedLen() int {
-	return int(h.Length)
-}
-
-// The length the message will be after it has been decrypted
-func (h *header) DecryptedLen() int {
-	return int(h.Length - box.Overhead)
-}
-
 // Check that the encrypted message length fits within an int on this machine.
 // Potentially important when mixing 32 and 64 bit machines.
 func (h *header) CheckLength() error {
@@ -121,7 +111,7 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 	}
 
 	// Read the encrypted message
-	tmp := make([]byte, h.EncryptedLen())
+	tmp := make([]byte, h.Length)
 	if _, err := io.ReadFull(p.src, tmp); err != nil {
 		return 0, err
 	}
