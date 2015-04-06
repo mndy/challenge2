@@ -127,17 +127,19 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 		return 0, err
 	}
 
-	// Decrypt message and check it is authentic
-	d, auth := box.OpenAfterPrecomputation(nil, tmp[:], &h.Nonce, p.key)
+	// Decrypt message and check it is authentic.
+	// Limit the capacity of b so that the Open function can't overwrite bytes
+	// > len(b).
+	d, auth := box.OpenAfterPrecomputation(b[:0:len(b)], tmp[:], &h.Nonce, p.key)
 	if !auth {
 		return 0, fmt.Errorf("Message failed authentication")
 	}
 
-	// Can avoid this copy by passing b into box.Open() if we have enough data
-	// However interface to box.Open() does not guarantee that it will not write
-	// to bytes between [len(b), cap(b)).
-	copy(b, d)
-	if len(b) < len(d) {
+	// Check to see if the underlying arrays are the same for both slices - if
+	// they are then we don't need to copy OR buffer anything as implicitly
+	// len(d) <= len(b).
+	if &d[0] != &b[0] {
+		copy(b, d)
 		p.buf = bytes.NewReader(d[len(b):])
 		return len(b), nil
 	}
@@ -145,6 +147,8 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 	return len(d), nil
 }
 
+// Generate a header and write it out. Then encrypt and write out the message.
+// Will only return less than len(b) if the error != nil.
 func (p *SecureWriter) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
@@ -152,7 +156,7 @@ func (p *SecureWriter) Write(b []byte) (int, error) {
 
 	h, err := newHeader(len(b))
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	if _, err := h.WriteTo(p.dst); err != nil {
 		return 0, err
