@@ -14,27 +14,36 @@ import (
 	"os"
 )
 
-// header encodes encrypted message length and nonce information.
-// It is sent unencrypted at the start of the message.
-// The length is used to ensure we read enough data to decrypt the
-// fix length message.
+// A header encodes encrypted message length and nonce information. It is
+// sent unencrypted at the start of the message. The length is used by the
+// reader to ensure it has exactly enough data to decrypt the full message.
 type header struct {
 	Length uint64
 	Nonce  [24]byte
 }
 
+// A secureReader reads encrypted messages from src and decrypts them using
+// the key. Since decryption needs to be done on fixed length messages it
+// contains a buffer to store any data not immediately read from the
+// decrypted message. Future calls to Read() will read from this buffer
+// until it is empty at which point a new message will be decrypted.
 type secureReader struct {
 	src io.Reader
 	key *[32]byte
 	buf []byte
 }
 
+// A secureWriter encrypts messages using the key and writes them to dst.
 type secureWriter struct {
 	dst io.Writer
 	key *[32]byte
 }
 
 func (p secureReader) Read(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+
 	// Check to see if there are still remnants of the last message to
 	// read
 	if p.buf == nil {
@@ -69,6 +78,10 @@ func (p secureReader) Read(b []byte) (int, error) {
 }
 
 func (p secureWriter) Write(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+
 	// Encode header containing length and randomly generated nonce
 	var h header
 	h.Length = uint64(len(b) + secretbox.Overhead)
@@ -162,22 +175,6 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 	}, nil
 }
 
-func secureLoopback(conn io.ReadWriteCloser) {
-	defer conn.Close()
-
-	priv, pub, err := swapKeys(conn)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	r := NewSecureReader(conn, priv, pub)
-	w := NewSecureWriter(conn, priv, pub)
-
-	if _, err := io.Copy(w, r); err != nil {
-		log.Fatal(err)
-	}
-}
-
 // Serve starts a secure echo server on the given listener.
 func Serve(l net.Listener) error {
 	for {
@@ -185,7 +182,21 @@ func Serve(l net.Listener) error {
 		if err != nil {
 			return err
 		}
-		go secureLoopback(conn)
+		go func() {
+			defer conn.Close()
+
+			priv, pub, err := swapKeys(conn)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			r := NewSecureReader(conn, priv, pub)
+			w := NewSecureWriter(conn, priv, pub)
+
+			if _, err := io.Copy(w, r); err != nil {
+				log.Fatal(err)
+			}
+		}()
 	}
 }
 
