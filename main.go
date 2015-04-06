@@ -138,8 +138,10 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 	// len(d) <= len(b).
 	if &d[0] != &b[0] {
 		copy(b, d)
-		p.buf = bytes.NewReader(d[len(b):])
-		return len(b), nil
+		if len(d) > len(b) {
+			p.buf = bytes.NewReader(d[len(b):])
+			return len(b), nil
+		}
 	}
 
 	return len(d), nil
