@@ -237,12 +237,12 @@ func Serve(l net.Listener) error {
 			defer conn.Close()
 			priv, pub, err := exchgKeys(conn)
 			if err != nil {
-				log.Fatal(err)
+				return
 			}
 			r := NewSecureReader(conn, priv, pub)
 			w := NewSecureWriter(conn, priv, pub)
 			if _, err := io.Copy(w, r); err != nil {
-				log.Fatal(err)
+				return
 			}
 		}()
 	}
