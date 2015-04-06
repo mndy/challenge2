@@ -199,8 +199,8 @@ func TestReadWriterPingLarge(t *testing.T) {
 		b[i] = byte(i % 100)
 	}
 	go func() {
-		secureW.Write(b[:len(b)/2])
-		secureW.Write(b[len(b)/2:])
+		secureW.Write(b[:len(b)/4])
+		secureW.Write(b[len(b)/4:])
 		w.Close()
 	}()
 

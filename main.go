@@ -6,24 +6,26 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"golang.org/x/crypto/nacl/box"
 	"io"
 	"log"
 	"net"
 	"os"
+
+	"golang.org/x/crypto/nacl/box"
 )
 
-// Calculate maximum signed integer. See:
-// https://groups.google.com/forum/#!msg/golang-nuts/a9PitPAHSSU/ziQw1-QHw3EJ
-const maxInt = int(^uint(0) >> 1)
+// maxLength is the maximum length of an unencrypted message.
+const maxLength = (1 << 15) - 1 - box.Overhead
+
+// minLength is the minimum length of an unencrypted message.
+const minLength = 1
 
 // A header encodes encrypted message length and nonce information. It is sent
 // unencrypted at the start of the message. The length is used by the reader to
 // ensure it has exactly enough data to decrypt the full message. Length is
-// encoded as an unsigned 64 bit value to ensure correctness between 32 bit and
-// 64 bit machines.
+// encoded as a signed 16-bit.
 type header struct {
-	Length uint64
+	Length int16
 	Nonce  [24]byte
 }
 
@@ -48,79 +50,71 @@ type SecureWriter struct {
 	key *[32]byte
 }
 
-// Creates a new header for a message with an unencrypted length of l. The nonce
-// will be generated from rand.Reader.
-func newHeader(l int) (*header, error) {
-	h := new(header)
-	h.Length = uint64(l) + box.Overhead
-	if err := h.CheckLength(); err != nil {
-		return nil, err
+// newHeader creates a header for a message with an unencrypted length of l. The
+// nonce will be generated from rand.Reader.
+func newHeader(length int) (*header, error) {
+	if length > maxLength {
+		return nil, fmt.Errorf("message size (%d) is larger than %d bytes", length, maxLength)
 	}
+	if length < minLength {
+		return nil, fmt.Errorf("message size (%d) is smaller than %d bytes", length, minLength)
+	}
+	h := new(header)
+	h.Length = int16(length) + box.Overhead
 	if _, err := io.ReadFull(rand.Reader, h.Nonce[:]); err != nil {
 		return nil, err
 	}
-	return h, h.CheckLength()
+	return h, nil
 }
 
-// Serialise the header and write it out.
-func (h *header) WriteTo(w io.Writer) (n int64, err error) {
+// WriteTo serialises the header and writes it out. It returns the number of
+// bytes written and conforms to the io.WriteTo() interface.
+func (h *header) WriteTo(w io.Writer) (int64, error) {
 	b := new(bytes.Buffer)
-	if err = binary.Write(b, binary.LittleEndian, h); err != nil {
-		return
+	if err := binary.Write(b, binary.LittleEndian, h); err != nil {
+		return 0, err
 	}
-
-	nint, err := w.Write(b.Bytes())
-	n = int64(nint)
-	return
+	n, err := w.Write(b.Bytes())
+	return int64(n), err
 }
 
-// Check that the encrypted message length fits within an int on this machine.
-// Potentially important when mixing 32 and 64 bit machines.
-func (h *header) CheckLength() error {
-	if h.Length > uint64(maxInt) {
-		return fmt.Errorf("Message length (%d) is out of range (max is %d)", h.Length, maxInt)
-	}
-	return nil
+// ReadHeader deserialises a header read from the given io.Reader.
+func ReadHeader(r io.Reader) (*header, error) {
+	h := new(header)
+	return h, binary.Read(r, binary.LittleEndian, h)
 }
 
-// Read in a header. Check if the header length fits into an int so that we do
-// not have to check elsewhere.
-func ReadHeader(r io.Reader) (h header, err error) {
-	err = binary.Read(r, binary.LittleEndian, &h)
-	if err == nil {
-		err = h.CheckLength()
-	}
-	return
-}
-
+// Read implements the standard Read interface. It will read up to len(b) bytes
+// of unencrypted data into b. To do this it must read the entire underlying
+// encrypted message and will block until it is able to do so, or an error
+// occurs. If it is unable to decrypt the message an error will be returned.
 func (p *SecureReader) Read(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
 
-	// Check to see if there are still remnants of the last message to
-	// read
+	// Check to see if there are still remnants of the last message to read.
 	if p.buf.Len() > 0 {
 		return p.buf.Read(b)
 	}
 
-	// Read header from stream
+	// Read header from stream.
 	h, err := ReadHeader(p.src)
 	if err != nil {
 		return 0, err
 	}
 
-	// Read the encrypted message
-	tmp := make([]byte, h.Length)
-	if _, err := io.ReadFull(p.src, tmp); err != nil {
+	// Read the encrypted message.
+	e := make([]byte, h.Length)
+	if _, err := io.ReadFull(p.src, e); err != nil {
 		return 0, err
 	}
 
 	// Decrypt message into d and check it is authentic. Limit the capacity of b
 	// so that the Open...() function can't overwrite bytes > len(b).
-	d, aut := box.OpenAfterPrecomputation(b[:0:len(b)], tmp[:], &h.Nonce, p.key)
-	if !aut {
-		return 0, fmt.Errorf("Message failed authentication")
+	d, a := box.OpenAfterPrecomputation(b[:0:len(b)], e[:], &h.Nonce, p.key)
+	if !a {
+		return 0, fmt.Errorf("message failed authentication")
 	}
 
 	// Check to see if the underlying arrays are the same for b & d slices - if
@@ -133,10 +127,10 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 			return len(b), nil
 		}
 	}
-
 	return len(d), nil
 }
 
+// Write implements the standard write interface.
 // Generate a header and write it out. Then encrypt and write out the message.
 // Will only return less than len(b) if the error != nil.
 func (p *SecureWriter) Write(b []byte) (int, error) {
@@ -144,17 +138,23 @@ func (p *SecureWriter) Write(b []byte) (int, error) {
 		return 0, nil
 	}
 
-	h, err := newHeader(len(b))
-	if err != nil {
-		return 0, err
-	}
-	if _, err := h.WriteTo(p.dst); err != nil {
-		return 0, err
-	}
-
-	tmp := box.SealAfterPrecomputation(nil, b, &h.Nonce, p.key)
-	if _, err := p.dst.Write(tmp); err != nil {
-		return 0, err
+	// Send b in chunks such that we only send at most maxLength bytes at a time
+	for i := 0; i < len(b); i += maxLength {
+		l := i + maxLength
+		if l > len(b) {
+			l = len(b)
+		}
+		h, err := newHeader(len(b[i:l]))
+		if err != nil {
+			return i, err
+		}
+		if _, err := h.WriteTo(p.dst); err != nil {
+			return i, err
+		}
+		e := box.SealAfterPrecomputation(nil, b[i:l], &h.Nonce, p.key)
+		if _, err := p.dst.Write(e); err != nil {
+			return i, err
+		}
 	}
 	return len(b), nil
 }
@@ -173,22 +173,22 @@ func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
 	return &sw
 }
 
-// Generate a public/private key pair. Swap public keys over ReadWriter. Return
-// our private key and our partner's public key.
-func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
+// exchgKeys generates a public/private key pair and swaps the public key with
+// its counterpart over rw. Returns the private key generated and the public
+// key of its counterpart.
+func exchgKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
 	// Always return nil for the keys if there is an error
 	defer func() {
 		if err != nil {
 			priv, peer = nil, nil
 		}
 	}()
-
 	pub, priv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return
 	}
 
-	// Send
+	// Send our public key
 	senderr := make(chan error)
 	go func() {
 		_, err := rw.Write(pub[:])
@@ -200,35 +200,30 @@ func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
 		}
 	}()
 
-	// Receive
+	// Receive partner's public key
 	peer = new([32]byte)
 	_, err = io.ReadFull(rw, peer[:])
-
 	return
 }
 
 // Dial generates a private/public key pair, connects to the server, perform the
 // handshake and return a reader/writer.
-func Dial(addr string) (rwc io.ReadWriteCloser, err error) {
+func Dial(addr string) (io.ReadWriteCloser, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return
+		return nil, err
 	}
-
-	priv, pub, err := swapKeys(conn)
+	priv, pub, err := exchgKeys(conn)
 	if err != nil {
-		return
+		return nil, err
 	}
-
 	r := NewSecureReader(conn, priv, pub)
 	w := NewSecureWriter(conn, priv, pub)
-	rwc = struct {
+	return struct {
 		io.Reader
 		io.Writer
 		io.Closer
-	}{r, w, conn}
-
-	return
+	}{r, w, conn}, nil
 }
 
 // Serve starts a secure echo server on the given listener.
@@ -240,15 +235,12 @@ func Serve(l net.Listener) error {
 		}
 		go func() {
 			defer conn.Close()
-
-			priv, pub, err := swapKeys(conn)
+			priv, pub, err := exchgKeys(conn)
 			if err != nil {
 				log.Fatal(err)
 			}
-
 			r := NewSecureReader(conn, priv, pub)
 			w := NewSecureWriter(conn, priv, pub)
-
 			if _, err := io.Copy(w, r); err != nil {
 				log.Fatal(err)
 			}
