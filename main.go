@@ -44,18 +44,15 @@ func (p secureReader) Read(b []byte) (int, error) {
 			return 0, err
 		}
 
-		// Allocate a buffer to contain the encrypted and decrypted message
-		p.buf = make([]byte, h.Length-secretbox.Overhead)
-		tmp := make([]byte, h.Length)
-
 		// Read the encrypted message
+		tmp := make([]byte, h.Length)
 		if _, err := io.ReadFull(p.src, tmp); err != nil {
 			return 0, err
 		}
 
 		// Decrypt message and check it is authentic
-		_, auth := secretbox.Open(p.buf[:0], tmp[:], &h.Nonce, p.key)
-		if !auth {
+		p.buf = make([]byte, h.Length-secretbox.Overhead)
+		if _, auth := secretbox.Open(p.buf[:0], tmp[:], &h.Nonce, p.key); !auth {
 			return 0, fmt.Errorf("Message failed authentication")
 		}
 	}
@@ -165,7 +162,7 @@ func Dial(addr string) (io.ReadWriteCloser, error) {
 	}, nil
 }
 
-func connect(conn net.Conn) {
+func secureLoopback(conn io.ReadWriteCloser) {
 	defer conn.Close()
 
 	priv, pub, err := swapKeys(conn)
@@ -188,7 +185,7 @@ func Serve(l net.Listener) error {
 		if err != nil {
 			return err
 		}
-		go connect(conn)
+		go secureLoopback(conn)
 	}
 }
 
