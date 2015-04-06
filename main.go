@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"golang.org/x/crypto/nacl/box"
-	"golang.org/x/crypto/nacl/secretbox"
 	"io"
 	"log"
 	"net"
@@ -22,69 +21,80 @@ type header struct {
 	Nonce  [24]byte
 }
 
-// A secureReader reads encrypted messages from src and decrypts them using
+// A SecureReader reads encrypted messages from src and decrypts them using
 // the key. Since decryption needs to be done on fixed length messages it
 // contains a buffer to store any data not immediately read from the
 // decrypted message. Future calls to Read() will read from this buffer
 // until it is empty at which point a new message will be decrypted.
-type secureReader struct {
+//
+// *SecureReader implements the io.Reader() interface.
+type SecureReader struct {
 	src io.Reader
 	key *[32]byte
-	buf []byte
+	buf *bytes.Reader
 }
 
-// A secureWriter encrypts messages using the key and writes them to dst.
-type secureWriter struct {
+// A SecureWriter encrypts messages using the key and writes them to dst.
+//
+// *SecureWriter implements the io.Writer() interface.
+type SecureWriter struct {
 	dst io.Writer
 	key *[32]byte
 }
 
-func (p secureReader) Read(b []byte) (int, error) {
+func (p *SecureReader) Read(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
 
 	// Check to see if there are still remnants of the last message to
 	// read
-	if p.buf == nil {
-		// Read header from stream
-		var h header
-		if err := binary.Read(p.src, binary.LittleEndian, &h); err != nil {
-			return 0, err
-		}
-
-		// Read the encrypted message
-		tmp := make([]byte, h.Length)
-		if _, err := io.ReadFull(p.src, tmp); err != nil {
-			return 0, err
-		}
-
-		// Decrypt message and check it is authentic
-		p.buf = make([]byte, h.Length-secretbox.Overhead)
-		if _, auth := secretbox.Open(p.buf[:0], tmp[:], &h.Nonce, p.key); !auth {
-			return 0, fmt.Errorf("Message failed authentication")
-		}
+	if p.buf.Len() > 0 {
+		return p.buf.Read(b)
 	}
 
-	// Copy the result into the output buffer, leaving a partial result
-	// in the buffer if needed
-	size := copy(b, p.buf)
-	if size == len(p.buf) {
-		p.buf = nil
+	// Read header from stream
+	var h header
+	if err := binary.Read(p.src, binary.LittleEndian, &h); err != nil {
+		return 0, err
+	}
+
+	// Read the encrypted message
+	tmp := make([]byte, h.Length)
+	if _, err := io.ReadFull(p.src, tmp); err != nil {
+		return 0, err
+	}
+
+	// Decrypt message and check it is authentic
+	decryptsize := int(h.Length) - box.Overhead
+	var decrypted []byte
+	if len(b) < decryptsize {
+		decrypted = make([]byte, decryptsize)
 	} else {
-		p.buf = p.buf[size:]
+		decrypted = b
 	}
-	return size, nil
+
+	if _, auth := box.OpenAfterPrecomputation(decrypted[:0], tmp[:], &h.Nonce, p.key); !auth {
+		return 0, fmt.Errorf("Message failed authentication")
+	}
+
+	if len(b) < decryptsize {
+		copy(b, decrypted)
+		p.buf = bytes.NewReader(decrypted[len(b):])
+		return len(b), nil
+	}
+
+	return decryptsize, nil
 }
 
-func (p secureWriter) Write(b []byte) (int, error) {
+func (p *SecureWriter) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
 
 	// Encode header containing length and randomly generated nonce
 	var h header
-	h.Length = uint64(len(b) + secretbox.Overhead)
+	h.Length = uint64(len(b) + box.Overhead)
 	if _, err := io.ReadFull(rand.Reader, h.Nonce[:]); err != nil {
 		return 0, err
 	}
@@ -98,7 +108,7 @@ func (p secureWriter) Write(b []byte) (int, error) {
 
 	// Encrypt and send the message
 	tmp := make([]byte, h.Length)
-	secretbox.Seal(tmp[:0], b, &h.Nonce, p.key)
+	box.SealAfterPrecomputation(tmp[:0], b, &h.Nonce, p.key)
 	if _, err := p.dst.Write(tmp); err != nil {
 		return 0, err
 	}
@@ -107,20 +117,19 @@ func (p secureWriter) Write(b []byte) (int, error) {
 
 // NewSecureReader instantiates a new SecureReader
 func NewSecureReader(r io.Reader, priv, pub *[32]byte) io.Reader {
-	sr := secureReader{src: r, key: new([32]byte), buf: nil}
+	sr := SecureReader{src: r, key: new([32]byte), buf: bytes.NewReader(nil)}
 	box.Precompute(sr.key, pub, priv)
-	return sr
+	return &sr
 }
 
 // NewSecureWriter instantiates a new SecureWriter
 func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
-	sw := secureWriter{dst: w, key: new([32]byte)}
+	sw := SecureWriter{dst: w, key: new([32]byte)}
 	box.Precompute(sw.key, pub, priv)
-	return sw
+	return &sw
 }
 
-// Generate a public/private key pair.
-// Swap public keys over ReadWriter.
+// Generate a public/private key pair. Swap public keys over ReadWriter.
 func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
 	// Generate our public/private key pair
 	pub, priv, err := box.GenerateKey(rand.Reader)
