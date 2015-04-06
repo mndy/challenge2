@@ -13,26 +13,25 @@ import (
 	"os"
 )
 
-// Calculate maximum signed integer
+// Calculate maximum signed integer. See:
 // https://groups.google.com/forum/#!msg/golang-nuts/a9PitPAHSSU/ziQw1-QHw3EJ
 const maxInt = int(^uint(0) >> 1)
 
-// A header encodes encrypted message length and nonce information. It is
-// sent unencrypted at the start of the message. The length is used by the
-// reader to ensure it has exactly enough data to decrypt the full message.
-//
-// Length is encoded as an unsigned 64 bit value to ensure correctness
-// between 32 bit and 64 bit machines.
+// A header encodes encrypted message length and nonce information. It is sent
+// unencrypted at the start of the message. The length is used by the reader to
+// ensure it has exactly enough data to decrypt the full message. Length is
+// encoded as an unsigned 64 bit value to ensure correctness between 32 bit and
+// 64 bit machines.
 type header struct {
 	Length uint64
 	Nonce  [24]byte
 }
 
-// A SecureReader reads encrypted messages from src and decrypts them using
-// the key. Since decryption needs to be done on fixed length messages it
-// contains a buffer to store any data not immediately read from the
-// decrypted message. Future calls to Read() will read from this buffer
-// until it is empty at which point a new message will be decrypted.
+// A SecureReader reads encrypted messages from src and decrypts them using the
+// key. Since decryption needs to be done on fixed length messages it contains a
+// buffer to store any data not immediately read from the decrypted message.
+// Future calls to Read() will read from this buffer until it is empty at which
+// point a new message will be decrypted.
 //
 // *SecureReader implements the io.Reader() interface.
 type SecureReader struct {
@@ -94,8 +93,8 @@ func (h *header) CheckLength() error {
 	return nil
 }
 
-// Read in a header. Check if the header length fits into an int so we
-// don't have to check elsewhere.
+// Read in a header. Check if the header length fits into an int so that we do
+// not have to check elsewhere.
 func ReadHeader(r io.Reader) (h header, err error) {
 	err = binary.Read(r, binary.LittleEndian, &h)
 	if err == nil {
@@ -127,11 +126,10 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 		return 0, err
 	}
 
-	// Decrypt message and check it is authentic.
-	// Limit the capacity of b so that the Open function can't overwrite bytes
-	// > len(b).
-	d, auth := box.OpenAfterPrecomputation(b[:0:len(b)], tmp[:], &h.Nonce, p.key)
-	if !auth {
+	// Decrypt message into d and check it is authentic. Limit the capacity of b
+	// so that the Open...() function can't overwrite bytes > len(b).
+	d, aut := box.OpenAfterPrecomputation(b[:0:len(b)], tmp[:], &h.Nonce, p.key)
+	if !aut {
 		return 0, fmt.Errorf("Message failed authentication")
 	}
 
@@ -183,8 +181,8 @@ func NewSecureWriter(w io.Writer, priv, pub *[32]byte) io.Writer {
 	return &sw
 }
 
-// Generate a public/private key pair. Swap public keys over ReadWriter.
-// Return our private key and our partner's public key.
+// Generate a public/private key pair. Swap public keys over ReadWriter. Return
+// our private key and our partner's public key.
 func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
 	// Always return nil for the keys if there is an error
 	defer func() {
@@ -217,9 +215,8 @@ func swapKeys(rw io.ReadWriter) (priv, peer *[32]byte, err error) {
 	return
 }
 
-// Dial generates a private/public key pair,
-// connects to the server, perform the handshake
-// and return a reader/writer.
+// Dial generates a private/public key pair, connects to the server, perform the
+// handshake and return a reader/writer.
 func Dial(addr string) (rwc io.ReadWriteCloser, err error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
