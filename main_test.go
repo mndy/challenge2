@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -182,5 +183,41 @@ func TestSecureDial(t *testing.T) {
 	expected := "hello world\n"
 	if _, err := fmt.Fprintf(conn, expected); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadWriterPingLarge(t *testing.T) {
+	priv, pub := &[32]byte{'p', 'r', 'i', 'v'}, &[32]byte{'p', 'u', 'b'}
+
+	r, w := io.Pipe()
+	secureR := NewSecureReader(r, priv, pub)
+	secureW := NewSecureWriter(w, priv, pub)
+
+	// Encrypt large array
+	b := make([]byte, 65536)
+	for i := range b {
+		b[i] = byte(i % 100)
+	}
+	go func() {
+		secureW.Write(b[:len(b)/2])
+		secureW.Write(b[len(b)/2:])
+		w.Close()
+	}()
+
+	// Decrypt message
+	buf := make([]byte, 1024)
+	res := make([]byte, 65536)
+	for nn := 0; nn < len(res); {
+		n, err := secureR.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy(res[nn:], buf[:n])
+		nn += n
+	}
+
+	// Make sure we have b back
+	if bytes.Compare(b, res) != 0 {
+		t.Fatalf("Unexpected result")
 	}
 }
