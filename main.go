@@ -133,7 +133,7 @@ func (p *SecureReader) Read(b []byte) (int, error) {
 		return 0, fmt.Errorf("Message failed authentication")
 	}
 
-	// Check to see if the underlying arrays are the same for both slices - if
+	// Check to see if the underlying arrays are the same for b & d slices - if
 	// they are then we don't need to copy OR buffer anything as implicitly
 	// len(d) <= len(b).
 	if &d[0] != &b[0] {
