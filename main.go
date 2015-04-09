@@ -250,15 +250,15 @@ func Serve(l net.Listener) error {
 		}
 		go func() {
 			defer conn.Close()
-			priv, pub, err := exchgKeys(conn)
+			priv, pub, err := swapKeys(conn)
 			if err != nil {
-				log.Printf("ERROR: key exchange failed: %v", err)
+				log.Printf("key exchange failed: %v", err)
 				return
 			}
 			r := NewSecureReader(conn, priv, pub)
 			w := NewSecureWriter(conn, priv, pub)
 			if _, err := io.Copy(w, r); err != nil {
-				log.Printf("ERROR: message forwarding failed: %v", err)
+				log.Printf("message forwarding failed: %v", err)
 				return
 			}
 		}()
